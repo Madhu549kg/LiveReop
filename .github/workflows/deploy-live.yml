@@ -1,70 +1,63 @@
-# A descriptive name for your workflow.
 name: Deploy LiveRepo to Customer Sites
 
-# This workflow can be triggered in two ways:
-# 1. Automatically when you push code to a branch starting with 'Customer'.
-# 2. Manually from the GitHub Actions tab, where you can select the branch.
+# This workflow runs automatically when you push to a Customer branch,
+# OR you can run it manually and choose which customer branch to deploy.
 on:
   push:
     branches:
-      - 'Customer*' # Triggers for any branch starting with 'Customer'
+      - 'CustomerX'
+      - 'CustomerY'
+      - 'CustomerZ'
   workflow_dispatch:
     inputs:
       branch_name:
         description: 'Which customer branch do you want to deploy?'
         required: true
         type: choice
-        options: 
-          # This list should be updated when you add new customers.
+        options:
           - CustomerX
           - CustomerY
           - CustomerZ
 
-# Environment variables are used to store paths and settings, making them easy to change in one place.
 env:
+  # IMPORTANT: Please verify these filenames at the root of your LiveRepo repository.
   SOLUTION_PATH: 'LiveRepo.sln'
   PROJECT_PATH: 'LiveRepo.csproj'
-  PUBLISH_PATH: '${{ github.workspace }}\publish_output' # A temporary folder for the build output.
+  PUBLISH_PATH: '${{ github.workspace }}\publish_output'
 
 jobs:
   build-and-deploy:
-    # This job runs on your self-hosted runner, which is installed on your Windows Server.
     runs-on: self-hosted
 
     steps:
-      # Step 1: Checks out the specific branch code.
-      # It smartly uses the branch from the manual trigger (workflow_dispatch) OR the branch that was pushed to.
+      # Step 1: Checks out the specific branch that triggered the workflow.
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch_name || github.ref_name }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch_name || github.ref }}
 
-      # Step 2 & 3: Sets up the build environment for a .NET Framework project.
+      # Step 2 & 3: Standard setup for NuGet and MSBuild.
       - name: Setup NuGet
         uses: NuGet/setup-nuget@v2
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      # Step 4: Restores all the necessary packages for your solution.
+      # Step 4: Restores packages for the checked-out version of the code.
       - name: Restore NuGet Packages
         run: nuget restore ${{ env.SOLUTION_PATH }}
 
-      # Step 5: Builds the project in 'Release' mode and publishes the output to the temporary PUBLISH_PATH folder.
+      # Step 5: Builds and publishes the checked-out version of the code.
       - name: Build and Publish Project
-        run: >
-          msbuild ${{ env.PROJECT_PATH }} 
-          "/t:Build;WebPublish"
-          /p:Configuration=Release
-          /p:DeployOnBuild=true
-          /p:WebPublishMethod=FileSystem
-          /p:publishUrl=${{ env.PUBLISH_PATH }}
+        run: msbuild ${{ env.PROJECT_PATH }} "/t:Build;WebPublish" /p:Configuration=Release /p:DeployOnBuild=true /p:WebPublishMethod=FileSystem /p:publishUrl=${{ env.PUBLISH_PATH }}
 
-      # Step 6: Deploys the published files to the correct customer's IIS site.
-      - name: Deploy to Customer IIS Site
-        shell: powershell # Ensures this script block runs using PowerShell
+      # Step 6: The "smart" deployment script that uses the branch name to decide the destination.
+      - name: Deploy to Correct Customer Site
+        env:
+          BRANCH: ${{ github.ref_name }}
+          MANUAL_BRANCH: ${{ github.event.inputs.branch_name }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          # --- CENTRAL CONFIGURATION: Map Branch Names to IIS Site Info ---
-          # To add a new customer, just add a new line here.
+          # --- Configuration: Map Branch Names to IIS Site Info ---
           $customerMapping = @{
               "CustomerX" = @{ "Path" = "C:\inetpub\wwwroot\LiveRepoX"; "Name" = "LiveRepoX" };
               "CustomerY" = @{ "Path" = "C:\inetpub\wwwroot\LiveRepoY"; "Name" = "LiveRepoY" };
@@ -72,18 +65,17 @@ jobs:
           }
           # --- End Configuration ---
           
-          # Determine the correct branch name from the trigger event.
-          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
-            $branchName = "${{ github.event.inputs.branch_name }}"
+          # Determine the branch name from either the push or the manual input
+          if ("$env:EVENT_NAME" -eq "workflow_dispatch") {
+            $branchName = "$env:MANUAL_BRANCH"
           } else {
-            $branchName = "${{ github.ref_name }}"
+            $branchName = "$env:BRANCH"
           }
 
-          Write-Host "INFO: Determined branch for deployment is '$branchName'."
+          Write-Host "Triggering branch is: $branchName"
           
-          # Validate that we have a mapping for this branch.
           if (-not $customerMapping.ContainsKey($branchName)) {
-              Write-Error "FATAL: No customer site mapping found for branch '$branchName'. Please update the deploy.yml file."
+              Write-Host "Error: No customer site mapping found for branch '$branchName'."
               exit 1
           }
           
@@ -91,23 +83,17 @@ jobs:
           $destinationPath = $siteInfo.Path
           $siteName = $siteInfo.Name
           
-          Write-Host "INFO: Preparing to deploy to IIS site '$siteName' at path '$destinationPath'."
+          Write-Host "Deploying branch '$branchName' to IIS site '$siteName' at path '$destinationPath'"
           
-          # Import the IIS PowerShell module.
           Import-Module WebAdministration
           
-          # Stop the IIS website to unlock all files.
-          Write-Host "STEP 1: Stopping IIS site '$siteName'..."
+          Write-Host "Stopping IIS site: $siteName"
           Stop-Website -Name $siteName
           
-          # Use robocopy for a robust and clean deployment.
-          # /E copies all subdirectories, including empty ones.
-          # /PURGE deletes files in the destination that no longer exist in the source. This is crucial for a clean deployment.
-          Write-Host "STEP 2: Copying published files from '${{ env.PUBLISH_PATH }}' to '$destinationPath'..."
-          robocopy "${{ env.PUBLISH_PATH }}" "$destinationPath" /E /PURGE
+          Write-Host "Copying all published files to destination..."
+          Copy-Item -Path "${{ env.PUBLISH_PATH }}\*" -Destination $destinationPath -Recurse -Force
           
-          # Start the IIS website again.
-          Write-Host "STEP 3: Starting IIS site '$siteName'..."
+          Write-Host "Starting IIS site: $siteName"
           Start-Website -Name $siteName
           
-          Write-Host "SUCCESS: Deployment for branch '$branchName' is complete! ✅"
+          Write-Host "Deployment for branch '$branchName' complete!"
