@@ -21,8 +21,8 @@ on:
 
 env:
   # IMPORTANT: Please verify these filenames at the root of your LiveRepo repository.
-  SOLUTION_PATH: 'LiveRepo.sln'
-  PROJECT_PATH: 'LiveRepo.csproj'
+  SOLUTION_PATH: 'LiveReop.sln'
+  PROJECT_PATH: 'LiveReop.csproj'
   PUBLISH_PATH: '${{ github.workspace }}\publish_output'
 
 jobs:
