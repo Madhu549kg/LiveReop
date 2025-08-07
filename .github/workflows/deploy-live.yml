@@ -1,0 +1,99 @@
+name: Deploy LiveRepo to Customer Sites
+
+# This workflow runs automatically when you push to a Customer branch,
+# OR you can run it manually and choose which customer branch to deploy.
+on:
+  push:
+    branches:
+      - 'CustomerX'
+      - 'CustomerY'
+      - 'CustomerZ'
+  workflow_dispatch:
+    inputs:
+      branch_name:
+        description: 'Which customer branch do you want to deploy?'
+        required: true
+        type: choice
+        options:
+          - CustomerX
+          - CustomerY
+          - CustomerZ
+
+env:
+  # IMPORTANT: Please verify these filenames at the root of your LiveRepo repository.
+  SOLUTION_PATH: 'LiveReop.sln'
+  PROJECT_PATH: 'LiveReop.csproj'
+  PUBLISH_PATH: '${{ github.workspace }}\publish_output'
+
+jobs:
+  build-and-deploy:
+    runs-on: self-hosted
+
+    steps:
+      # Step 1: Checks out the specific branch that triggered the workflow.
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch_name || github.ref }}
+
+      # Step 2 & 3: Standard setup for NuGet and MSBuild.
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      # Step 4: Restores packages for the checked-out version of the code.
+      - name: Restore NuGet Packages
+        run: nuget restore ${{ env.SOLUTION_PATH }}
+
+      # Step 5: Builds and publishes the checked-out version of the code.
+      - name: Build and Publish Project
+        run: msbuild ${{ env.PROJECT_PATH }} "/t:Build;WebPublish" /p:Configuration=Release /p:DeployOnBuild=true /p:WebPublishMethod=FileSystem /p:publishUrl=${{ env.PUBLISH_PATH }}
+
+      # Step 6: The "smart" deployment script that uses the branch name to decide the destination.
+      - name: Deploy to Correct Customer Site
+        env:
+          BRANCH: ${{ github.ref_name }}
+          MANUAL_BRANCH: ${{ github.event.inputs.branch_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          # --- Configuration: Map Branch Names to IIS Site Info ---
+          $customerMapping = @{
+              "CustomerX" = @{ "Path" = "C:\inetpub\wwwroot\LiveRepoX"; "Name" = "LiveRepoX" };
+              "CustomerY" = @{ "Path" = "C:\inetpub\wwwroot\LiveRepoY"; "Name" = "LiveRepoY" };
+              "CustomerZ" = @{ "Path" = "C:\inetpub\wwwroot\LiveRepoZ"; "Name" = "LiveRepoZ" };
+          }
+          # --- End Configuration ---
+          
+          # Determine the branch name from either the push or the manual input
+          if ("$env:EVENT_NAME" -eq "workflow_dispatch") {
+            $branchName = "$env:MANUAL_BRANCH"
+          } else {
+            $branchName = "$env:BRANCH"
+          }
+
+          Write-Host "Triggering branch is: $branchName"
+          
+          if (-not $customerMapping.ContainsKey($branchName)) {
+              Write-Host "Error: No customer site mapping found for branch '$branchName'."
+              exit 1
+          }
+          
+          $siteInfo = $customerMapping[$branchName]
+          $destinationPath = $siteInfo.Path
+          $siteName = $siteInfo.Name
+          
+          Write-Host "Deploying branch '$branchName' to IIS site '$siteName' at path '$destinationPath'"
+          
+          Import-Module WebAdministration
+          
+          Write-Host "Stopping IIS site: $siteName"
+          Stop-Website -Name $siteName
+          
+          Write-Host "Copying all published files to destination..."
+          Copy-Item -Path "${{ env.PUBLISH_PATH }}\*" -Destination $destinationPath -Recurse -Force
+          
+          Write-Host "Starting IIS site: $siteName"
+          Start-Website -Name $siteName
+          
+          Write-Host "Deployment for branch '$branchName' complete!"
